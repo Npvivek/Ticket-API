@@ -1,411 +1,331 @@
-
-"""
-Zoho ServiceDesk Ticket API - Refactored with OOP Design Patterns
-"""
-
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
 import requests
 import json
 import logging
+import threading
 from flask import Flask, request, jsonify
-from dataclasses import dataclass
-from datetime import datetime
-import time
+from datetime import datetime, timedelta
 
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('zoho_api.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# Configuration Management (Singleton Pattern)
-class Config:
-    """Singleton configuration class to manage application settings"""
-    _instance = None
+# --- Configuration ---
+ZOHO_CONFIG = {
+    "CLIENT_ID": "1000.RES8HX16XVF2J5CNIWJ74KQHPCKU2O",
+    "CLIENT_SECRET": "1a477e636ee5601709724e944853b49f3c0d9aa0e9",
+    "REFRESH_TOKEN": "1000.7adcea1f467d20ba083238aa1adac669.612fdd21defcd6cd48f51444cc0ff652",
+    "ACCOUNTS_URL": "https://accounts.zoho.com",
+    "API_BASE_URL": "https://support.quatrrobss.com/app/itdesk"  
+}
 
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(Config, cls).__new__(cls)
-            cls._instance._initialize()
-        return cls._instance
+# Token storage with expiry tracking
+token_store = {
+    "access_token": None,
+    "expires_at": None
+}
 
-    def _initialize(self):
-        self.ZOHO_CONFIG = {
-            "CLIENT_ID": "1000.RES8HX16XVF2J5CNIWJ74KQHPCKU2O",
-            "CLIENT_SECRET": "1a477e636ee5601709724e944853b49f3c0d9aa0e9",
-            "REFRESH_TOKEN": "1000.7adcea1f467d20ba083238aa1adac669.612fdd21defcd6cd48f51444cc0ff652",
-            "ACCOUNTS_URL": "https://accounts.zoho.com",
-            "API_BASE_URL": "https://support.quatrrobss.com/app/itdesk"
-        }
+# Thread lock to prevent race conditions during token refresh
+_token_lock = threading.Lock()
 
+def get_access_token():
+    """Get fresh access token with proper error handling and expiry tracking"""
+    logger.info("Attempting to refresh access token...")
 
-# Data Models (Data Classes)
-@dataclass
-class TicketRequest:
-    """Data class for ticket request"""
-    subject: str
-    description: str
-    requester_email: str
-    template: Optional[Dict[str, str]] = None
-    urgency: Optional[Dict[str, str]] = None
-    category: Optional[Dict[str, str]] = None
-    subcategory: Optional[Dict[str, str]] = None
-    item: Optional[Dict[str, str]] = None
-    udf_fields: Optional[Dict[str, Any]] = None
+    url = f"{ZOHO_CONFIG['ACCOUNTS_URL']}/oauth/v2/token"
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": ZOHO_CONFIG["CLIENT_ID"],
+        "client_secret": ZOHO_CONFIG["CLIENT_SECRET"],
+        "refresh_token": ZOHO_CONFIG["REFRESH_TOKEN"],
+    }
 
+    try:
+        response = requests.post(url, data=payload, timeout=30)
+        response.raise_for_status()
 
-@dataclass
-class ApiResponse:
-    """Data class for API responses"""
-    success: bool
-    data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    status_code: int = 200
+        data = response.json()
 
+        # CRITICAL: Check if the token was actually in the response to prevent KeyError
+        if "access_token" in data:
+            token_store["access_token"] = data["access_token"]
+            # Calculate expiry time (typically 1 hour, but add buffer)
+            expires_in = data.get("expires_in", 3600)  # Default 1 hour
+            token_store["expires_at"] = datetime.now() + timedelta(seconds=expires_in - 300)  # 5 min buffer
 
-# Abstract Base Classes (Strategy Pattern)
-class TokenManager(ABC):
-    """Abstract base class for token management"""
-
-    @abstractmethod
-    def get_access_token(self) -> Optional[str]:
-        """Get access token"""
-        pass
-
-    @abstractmethod
-    def refresh_token(self) -> bool:
-        """Refresh access token"""
-        pass
-
-
-class ApiClient(ABC):
-    """Abstract base class for API clients"""
-
-    @abstractmethod
-    def create_ticket(self, ticket_data: TicketRequest) -> ApiResponse:
-        """Create a ticket"""
-        pass
-
-
-# Concrete Implementations
-class ZohoTokenManager(TokenManager):
-    """Concrete implementation for Zoho token management"""
-
-    def __init__(self):
-        self.config = Config()
-        self._access_token: Optional[str] = None
-        self._token_expiry: Optional[datetime] = None
-        self.logger = logging.getLogger(__name__)
-
-    def get_access_token(self) -> Optional[str]:
-        """Get current access token, refresh if needed"""
-        if self._is_token_expired():
-            if not self.refresh_token():
-                return None
-        return self._access_token
-
-    def refresh_token(self) -> bool:
-        """Refresh the access token using refresh token"""
-        url = f"{self.config.ZOHO_CONFIG['ACCOUNTS_URL']}/oauth/v2/token"
-        payload = {
-            "grant_type": "refresh_token",
-            "client_id": self.config.ZOHO_CONFIG["CLIENT_ID"],
-            "client_secret": self.config.ZOHO_CONFIG["CLIENT_SECRET"],
-            "refresh_token": self.config.ZOHO_CONFIG["REFRESH_TOKEN"],
-        }
-
-        try:
-            response = requests.post(url, data=payload, timeout=30)
-            response.raise_for_status()
-
-            token_data = response.json()
-            self._access_token = token_data.get("access_token")
-
-            # Set token expiry (typically 1 hour from now)
-            expires_in = token_data.get("expires_in", 3600)
-            self._token_expiry = datetime.now().timestamp() + expires_in - 60  # 60s buffer
-
-            self.logger.info("Successfully refreshed access token")
+            logger.info("✅ Successfully refreshed access token")
+            logger.debug(f"Access token: {token_store['access_token']}")
+            logger.debug(f"Token expires in: {expires_in} seconds")
+            logger.debug(f"Token expires at: {token_store['expires_at']}")
             return True
-
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Error refreshing access token: {e}")
-            self._access_token = None
-            self._token_expiry = None
+        else:
+            logger.error(f"❌ Failed to get access token. Zoho API response: {data}")
+            token_store["access_token"] = None
+            token_store["expires_at"] = None
             return False
 
-    def _is_token_expired(self) -> bool:
-        """Check if current token is expired"""
-        if not self._access_token or not self._token_expiry:
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Error refreshing access token: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response content: {e.response.text}")
+        token_store["access_token"] = None
+        token_store["expires_at"] = None
+        return False
+
+def is_token_valid():
+    """Check if current token is valid and not expired"""
+    if not token_store.get("access_token"):
+        return False
+
+    if not token_store.get("expires_at"):
+        return False
+
+    return datetime.now() < token_store["expires_at"]
+
+def ensure_valid_token():
+    """
+    Ensure we have a valid access token using a thread-safe, double-checked lock.
+    """
+    # First check is quick and avoids locking if the token is already valid.
+    if is_token_valid():
+        return True
+
+    with _token_lock:
+        # Second check after acquiring the lock, in case another thread just refreshed it.
+        if is_token_valid():
             return True
-        return datetime.now().timestamp() >= self._token_expiry
+        return get_access_token()
 
+app = Flask(__name__)
 
-class ZohoServiceDeskClient(ApiClient):
-    """Concrete implementation for Zoho ServiceDesk API client"""
+@app.route("/", methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "running",
+        "service": "Zoho ServiceDesk Plus API",
+        "token_valid": is_token_valid(),
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
-    def __init__(self, token_manager: TokenManager):
-        self.config = Config()
-        self.token_manager = token_manager
-        self.logger = logging.getLogger(__name__)
+@app.route("/create_ticket", methods=['POST'])
+def create_zoho_ticket():
+    """Create ticket in Zoho ServiceDesk Plus with proper error handling"""
+    start_time = datetime.now()
+    logger.info(f"🎫 Starting ticket creation at {start_time}")
 
-    def create_ticket(self, ticket_data: TicketRequest) -> ApiResponse:
-        """Create a ticket in Zoho ServiceDesk"""
-        access_token = self.token_manager.get_access_token()
-        if not access_token:
-            return ApiResponse(
-                success=False,
-                error="Failed to obtain access token",
-                status_code=503
-            )
+    try:
+        # Get and validate request data
+        data = request.get_json()
+        if not data:
+            logger.error("No JSON data received")
+            return jsonify({"error": "No JSON data received"}), 400
 
-        # Build the request payload according to ServiceDesk API format
-        request_payload = self._build_request_payload(ticket_data)
+        logger.debug(f"Received request data: {json.dumps(data, indent=2)}")
 
-        api_url = f"{self.config.ZOHO_CONFIG['API_BASE_URL']}/api/v3/requests"
-        headers = {
-            "Authorization": f"Zoho-oauthtoken {access_token}",
-            "Accept": "application/vnd.manageengine.sdp.v3+json",
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-
-        # The API expects input_data as form data, not JSON
-        payload = {'input_data': json.dumps(request_payload)}
-
-        try:
-            response = requests.post(api_url, headers=headers, data=payload, timeout=30)
-
-            # Handle token expiry
-            if response.status_code == 401:
-                self.logger.info("Token expired, refreshing and retrying...")
-                if self.token_manager.refresh_token():
-                    headers["Authorization"] = f"Zoho-oauthtoken {self.token_manager.get_access_token()}"
-                    response = requests.post(api_url, headers=headers, data=payload, timeout=30)
-                else:
-                    return ApiResponse(
-                        success=False,
-                        error="Failed to refresh token",
-                        status_code=401
-                    )
-
-            response_data = response.json()
-
-            if response.status_code == 201:
-                ticket_id = response_data.get("request", {}).get("id")
-                return ApiResponse(
-                    success=True,
-                    data={
-                        "message": "Ticket created successfully in Zoho Service Desk",
-                        "zoho_ticket_id": ticket_id
-                    },
-                    status_code=201
-                )
-            else:
-                error_msg = self._extract_error_message(response_data)
-                return ApiResponse(
-                    success=False,
-                    error=f"API Error: {error_msg}",
-                    status_code=response.status_code
-                )
-
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Request failed: {e}")
-            return ApiResponse(
-                success=False,
-                error=f"Request failed: {str(e)}",
-                status_code=500
-            )
-
-    def _build_request_payload(self, ticket_data: TicketRequest) -> Dict[str, Any]:
-        """Build the request payload according to ServiceDesk API format"""
-        request_data = {
-            "request": {
-                "subject": ticket_data.subject,
-                "description": ticket_data.description,
-                "requester": {
-                    "email_id": ticket_data.requester_email
-                }
-            }
-        }
-
-        # Add optional fields if provided
-        if ticket_data.template:
-            request_data["request"]["template"] = ticket_data.template
-
-        if ticket_data.urgency:
-            request_data["request"]["urgency"] = ticket_data.urgency
-
-        if ticket_data.category:
-            request_data["request"]["category"] = ticket_data.category
-
-        if ticket_data.subcategory:
-            request_data["request"]["subcategory"] = ticket_data.subcategory
-
-        if ticket_data.item:
-            request_data["request"]["item"] = ticket_data.item
-
-        if ticket_data.udf_fields:
-            request_data["request"]["udf_fields"] = ticket_data.udf_fields
-
-        return request_data
-
-    def _extract_error_message(self, response_data: Dict[str, Any]) -> str:
-        """Extract error message from API response"""
-        try:
-            response_status = response_data.get("response_status", {})
-            messages = response_status.get("messages", [])
-            if messages:
-                return messages[0].get("message", "Unknown error")
-            return response_status.get("status", "Unknown error")
-        except (KeyError, IndexError):
-            return str(response_data)
-
-
-# Service Layer (Business Logic)
-class TicketService:
-    """Service layer for ticket operations"""
-
-    def __init__(self, api_client: ApiClient):
-        self.api_client = api_client
-        self.logger = logging.getLogger(__name__)
-
-    def create_ticket(self, ticket_data: Dict[str, Any]) -> ApiResponse:
-        """Create a ticket with validation"""
         # Validate required fields
-        validation_result = self._validate_ticket_data(ticket_data)
-        if not validation_result.success:
-            return validation_result
-
-        # Create ticket request object
-        ticket_request = TicketRequest(
-            subject=ticket_data['subject'],
-            description=ticket_data['description'],
-            requester_email=ticket_data['requester_email'],
-            template=ticket_data.get('template'),
-            urgency=ticket_data.get('urgency'),
-            category=ticket_data.get('category'),
-            subcategory=ticket_data.get('subcategory'),
-            item=ticket_data.get('item'),
-            udf_fields=ticket_data.get('udf_fields')
-        )
-
-        # Create ticket via API client
-        result = self.api_client.create_ticket(ticket_request)
-
-        # Log the operation
-        if result.success:
-            self.logger.info(f"Ticket created successfully: {result.data}")
-        else:
-            self.logger.error(f"Failed to create ticket: {result.error}")
-
-        return result
-
-    def _validate_ticket_data(self, data: Dict[str, Any]) -> ApiResponse:
-        """Validate ticket data"""
-        required_fields = ['subject', 'description', 'requester_email']
-        missing_fields = [field for field in required_fields if not data.get(field)]
+        base_required_fields = ['subject', 'description', 'requester_email']
+        missing_fields = [field for field in base_required_fields if not data.get(field)]
 
         if missing_fields:
-            return ApiResponse(
-                success=False,
-                error=f"Missing required fields: {', '.join(missing_fields)}",
-                status_code=400
-            )
+            logger.error(f"Missing base required fields: {', '.join(missing_fields)}")
+            return jsonify({
+                "error": f"Missing required fields: {', '.join(missing_fields)}"
+            }), 400
 
-        # Validate email format (basic validation)
-        email = data.get('requester_email', '')
-        if '@' not in email or '.' not in email.split('@')[-1]:
-            return ApiResponse(
-                success=False,
-                error="Invalid email format",
-                status_code=400
-            )
+        # Ensure we have a valid token
+        if not ensure_valid_token():
+            logger.error("Failed to obtain valid access token")
+            return jsonify({
+                "error": "API authentication failed. Unable to obtain access token."
+            }), 503
 
-        return ApiResponse(success=True)
+        # Prepare API request with CORRECT format for ServiceDesk Plus v3
+        api_url = f"{ZOHO_CONFIG['API_BASE_URL']}/api/v3/requests"
+        logger.info(f"API URL: {api_url}")
 
+        #Correct headers for ServiceDesk Plus v3 API
+        headers = {
+            "Authorization": f"Zoho-oauthtoken {token_store['access_token']}",
+            "Accept": "application/vnd.manageengine.sdp.v3+json",
+            "Content-Type": "application/x-www-form-urlencoded"  
+        }
+        logger.debug(f"Request headers: {headers}")
 
-# Factory Pattern for creating services
-class ServiceFactory:
-    """Factory for creating service instances"""
+        # Build the request data for Zoho by transforming the incoming JSON.
+        request_data_for_zoho = data.copy()
 
-    @staticmethod
-    def create_ticket_service() -> TicketService:
-        """Create a configured ticket service"""
-        token_manager = ZohoTokenManager()
-        api_client = ZohoServiceDeskClient(token_manager)
-        return TicketService(api_client)
+        
+        if 'requester_email' in request_data_for_zoho:
+            email = request_data_for_zoho.pop('requester_email')
+            request_data_for_zoho['requester'] = {'email_id': email}
 
+        # The final payload must be wrapped in a 'request' object
+        request_data = {
+            "request": request_data_for_zoho
+        }
 
-# Flask Application (Controller Layer)
-class TicketController:
-    """Controller for ticket-related endpoints"""
+        # CRITICAL: Prepare payload in correct format for ServiceDesk Plus
+        payload = {
+            'input_data': json.dumps(request_data)
+        }
+        logger.debug(f"Final payload structure: {json.dumps(payload, indent=2)}")
 
-    def __init__(self, ticket_service: TicketService):
-        self.ticket_service = ticket_service
+        # Make the API call with retry logic
+        def make_api_request():
+            logger.info("📤 Sending request to ServiceDesk Plus API...")
+            response = requests.post(api_url, headers=headers, data=payload, timeout=30)
+            logger.info(f"📥 API Response Status: {response.status_code}")  
+            logger.debug(f"API Response Headers: {dict(response.headers)}")
+            logger.debug(f"API Response Body: {response.text}")
+            return response
 
-    def create_ticket_endpoint(self):
-        """Flask endpoint for creating tickets"""
-        try:
-            data = request.get_json()
-            if not data:
-                return jsonify({"error": "No JSON data provided"}), 400
+        # First attempt
+        response = make_api_request()
 
-            result = self.ticket_service.create_ticket(data)
-
-            if result.success:
-                return jsonify(result.data), result.status_code
+        # Handle token expiry with retry
+        if response.status_code == 401:
+            logger.warning("⚠️  Access token expired, refreshing and retrying...")
+            if get_access_token():
+                headers["Authorization"] = f"Zoho-oauthtoken {token_store['access_token']}"
+                logger.info("🔄 Retrying with new token...")
+                response = make_api_request()
             else:
-                return jsonify({"error": result.error}), result.status_code
+                logger.error("❌ Failed to refresh token for retry")
+                return jsonify({
+                    "error": "Authentication failed. Unable to refresh access token."
+                }), 401
 
-        except Exception as e:
-            return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+        # Check for success
+        if response.status_code not in [200, 201]:
+            logger.error(f"❌ API request failed with status {response.status_code}")
+            logger.error(f"Response content: {response.text}")
 
+            # Try to parse more detailed error messages from Zoho
+            try:
+                error_data = response.json()
+                response_status = error_data.get('response_status', {})
+                messages = response_status.get('messages', [])
+                
+                if messages:
+                    # Build a detailed error message from all available info
+                    error_details = []
+                    for msg in messages:
+                        # Handle both single 'field' and plural 'fields' keys
+                        fields = msg.get('fields', [])
+                        if not fields and msg.get('field'):
+                            fields = [msg.get('field')]
 
-# Application Factory Pattern
-class FlaskAppFactory:
-    """Factory for creating Flask application"""
+                        msg_type = msg.get('type')
+                        message_text = msg.get('message')
+                        status_code = msg.get('status_code')
+                        
+                        # Special handling for the most common validation error
+                        if status_code == 4012 and fields:
+                            detail_str = f"Mandatory fields are missing for the template: {', '.join(fields)}"
+                        else:
+                            # Generic handling for all other errors
+                            error_parts = []
+                            if fields:
+                                error_parts.append(f"Field(s) '{', '.join(fields)}'")
+                            if msg_type:
+                                error_parts.append(f"({msg_type})")
+                            if message_text:
+                                error_parts.append(f": {message_text}")
+                            detail_str = " ".join(part for part in error_parts if part)
 
-    @staticmethod
-    def create_app() -> Flask:
-        """Create and configure Flask application"""
-        app = Flask(__name__)
+                        if detail_str:
+                            error_details.append(detail_str.strip())
 
-        # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+                    error_message = " | ".join(error_details) if error_details else "An unspecified error occurred. See details."
+                else:
+                    # Fallback if there's no 'messages' array
+                    error_message = response_status.get('status', 'Unknown error from Zoho')
 
-        # Create services
-        ticket_service = ServiceFactory.create_ticket_service()
-        ticket_controller = TicketController(ticket_service)
+                logger.error(f"Parsed Zoho API Error: {error_message}")
+                return jsonify({
+                    "error": f"ServiceDesk Plus API Error: {error_message}",
+                    "details": error_data  # Return the full JSON error from Zoho
+                }), response.status_code
+            except json.JSONDecodeError:
+                # This happens if the error response is not valid JSON (e.g., HTML from a proxy)
+                return jsonify({
+                    "error": f"API request failed with status {response.status_code} and non-JSON response",
+                    "details": response.text
+                }), response.status_code
 
-        # Register routes
-        app.add_url_rule(
-            '/create_ticket',
-            'create_ticket',
-            ticket_controller.create_ticket_endpoint,
-            methods=['POST']
-        )
+        # Parse successful response
+        try:
+            response_data = response.json()
+            logger.debug(f"Parsed response data: {json.dumps(response_data, indent=2)}")
 
-        # Health check endpoint
-        @app.route('/health')
-        def health_check():
-            return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+            # Extract ticket ID from response
+            ticket_id = None
+            if 'request' in response_data:
+                ticket_id = response_data['request'].get('id')
+            elif 'requests' in response_data and len(response_data['requests']) > 0:
+                ticket_id = response_data['requests'][0].get('id')
 
-        return app
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
 
+            logger.info(f"✅ Ticket created successfully - ID: {ticket_id}, Duration: {duration:.2f}s")
 
-# Application entry point
-def create_app():
-    """Application factory function"""
-    return FlaskAppFactory.create_app()
+            return jsonify({
+                "message": "Ticket created successfully in Zoho ServiceDesk Plus",
+                "zoho_ticket_id": ticket_id,
+                "processing_time": f"{duration:.2f}s",
+                "timestamp": datetime.now().isoformat()
+            }), 201
 
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Failed to parse API response as JSON: {e}")
+            logger.error(f"Raw response: {response.text}")
+            return jsonify({
+                "error": "Invalid JSON response from ServiceDesk Plus API",
+                "details": response.text
+            }), 500
+
+    except requests.exceptions.Timeout:
+        logger.error("❌ API request timed out")
+        return jsonify({
+            "error": "Request to ServiceDesk Plus API timed out"
+        }), 504
+
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"❌ Connection error: {e}")
+        return jsonify({
+            "error": "Unable to connect to ServiceDesk Plus API. Check network connectivity."
+        }), 503
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ API request failed: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response content: {e.response.text}")
+            return jsonify({
+                "error": f"ServiceDesk Plus API request failed: {str(e)}",
+                "details": e.response.text
+            }), 500
+        return jsonify({
+            "error": f"API request failed: {str(e)}"
+        }), 500
+
+    except Exception as e:
+        logger.error(f"❌ Unexpected error: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Internal server error occurred while processing the request"
+        }), 500
 
 if __name__ == '__main__':
-    app = create_app()
-
-    # Initialize token on startup
-    token_manager = ZohoTokenManager()
-    if token_manager.refresh_token():
-        print("Successfully initialized access token")
-    else:
-        print("Failed to initialize access token")
-
+    # Initialize token on startup within the main execution block.
+    # This prevents the token fetch from running twice when Flask's debug reloader is active.
+    with app.app_context():
+        get_access_token()
+    logger.info("🎯 Starting ServiceDesk Plus API server...")
     app.run(host='0.0.0.0', port=5000, debug=True)
