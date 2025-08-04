@@ -22,7 +22,7 @@ ZOHO_CONFIG = {
     "CLIENT_SECRET": "1a477e636ee5601709724e944853b49f3c0d9aa0e9",
     "REFRESH_TOKEN": "1000.7adcea1f467d20ba083238aa1adac669.612fdd21defcd6cd48f51444cc0ff652",
     "ACCOUNTS_URL": "https://accounts.zoho.com",
-    "API_BASE_URL": "https://support.quatrrobss.com/app/itdesk"  
+    "API_BASE_URL": "https://support.quatrrobss.com"  
 }
 
 # Token storage with expiry tracking
