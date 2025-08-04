@@ -10,3 +10,5 @@ __pycache__/
 
 # pytest cache
 .pytest_cache/
+
+zoho_api.log
