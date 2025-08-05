@@ -1,43 +1,42 @@
+import os
 import requests
 import json
 import logging
 import threading
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('zoho_api.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+load_dotenv()
+
+# --- Logging Setup ---
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# --- Configuration ---
+file_handler = logging.FileHandler('zoho_api.log', mode='a')
+file_handler.setFormatter(log_formatter)
+logger.addHandler(file_handler)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(log_formatter)
+logger.addHandler(stream_handler)
+
 ZOHO_CONFIG = {
-    "CLIENT_ID": "1000.RES8HX16XVF2J5CNIWJ74KQHPCKU2O",
-    "CLIENT_SECRET": "1a477e636ee5601709724e944853b49f3c0d9aa0e9",
-    "REFRESH_TOKEN": "1000.7adcea1f467d20ba083238aa1adac669.612fdd21defcd6cd48f51444cc0ff652",
+    "CLIENT_ID": os.getenv("ZOHO_CLIENT_ID"),
+    "CLIENT_SECRET": os.getenv("ZOHO_CLIENT_SECRET"),
+    "REFRESH_TOKEN": os.getenv("ZOHO_REFRESH_TOKEN"),
     "ACCOUNTS_URL": "https://accounts.zoho.com",
-    "API_BASE_URL": "https://support.quatrrobss.com"  
+    "API_BASE_URL": os.getenv("ZOHO_API_BASE_URL")
 }
 
-# Token storage with expiry tracking
-token_store = {
-    "access_token": None,
-    "expires_at": None
-}
-
-# Thread lock to prevent race conditions during token refresh
+# --- Thread-Safe Token Management ---
+token_store = {"access_token": None, "expires_at": None}
 _token_lock = threading.Lock()
 
 def get_access_token():
-    """Get fresh access token with proper error handling and expiry tracking"""
-    logger.info("Attempting to refresh access token...")
-
+    """Fetches a new access token from Zoho using the refresh token."""    
+    logger.info("Attempting to refresh Zoho access token...")
     url = f"{ZOHO_CONFIG['ACCOUNTS_URL']}/oauth/v2/token"
     payload = {
         "grant_type": "refresh_token",
@@ -45,287 +44,133 @@ def get_access_token():
         "client_secret": ZOHO_CONFIG["CLIENT_SECRET"],
         "refresh_token": ZOHO_CONFIG["REFRESH_TOKEN"],
     }
-
     try:
         response = requests.post(url, data=payload, timeout=30)
         response.raise_for_status()
-
         data = response.json()
-
-        # CRITICAL: Check if the token was actually in the response to prevent KeyError
         if "access_token" in data:
+            expires_in = data.get("expires_in", 3600)
             token_store["access_token"] = data["access_token"]
-            # Calculate expiry time (typically 1 hour, but add buffer)
-            expires_in = data.get("expires_in", 3600)  # Default 1 hour
-            token_store["expires_at"] = datetime.now() + timedelta(seconds=expires_in - 300)  # 5 min buffer
-
-            logger.info("✅ Successfully refreshed access token")
-            logger.debug(f"Access token: {token_store['access_token']}")
-            logger.debug(f"Token expires in: {expires_in} seconds")
-            logger.debug(f"Token expires at: {token_store['expires_at']}")
+            token_store["expires_at"] = datetime.now() + timedelta(seconds=expires_in - 300)
+            logger.info("✅ Successfully refreshed Zoho access token.")
             return True
         else:
-            logger.error(f"❌ Failed to get access token. Zoho API response: {data}")
-            token_store["access_token"] = None
-            token_store["expires_at"] = None
+            logger.error(f"❌ Zoho API did not return an access token. Response: {data}")
             return False
-
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Error refreshing access token: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"Response content: {e.response.text}")
-        token_store["access_token"] = None
-        token_store["expires_at"] = None
+        logger.error(f"❌ Exception during token refresh: {e}")
         return False
 
 def is_token_valid():
-    """Check if current token is valid and not expired"""
-    if not token_store.get("access_token"):
-        return False
-
-    if not token_store.get("expires_at"):
-        return False
-
-    return datetime.now() < token_store["expires_at"]
+    """Checks if the current token exists and has not expired."""
+    return token_store.get("access_token") and token_store.get("expires_at") and datetime.now() < token_store["expires_at"]
 
 def ensure_valid_token():
-    """
-    Ensure we have a valid access token using a thread-safe, double-checked lock.
-    """
-    # First check is quick and avoids locking if the token is already valid.
+    """Ensures a valid access token is available using a thread-safe lock."""
     if is_token_valid():
         return True
-
     with _token_lock:
-        # Second check after acquiring the lock, in case another thread just refreshed it.
+        # Double-check after acquiring the lock, in case another thread just refreshed it.
         if is_token_valid():
             return True
         return get_access_token()
 
+# --- Flask Application ---
 app = Flask(__name__)
 
 @app.route("/", methods=['GET'])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "running",
-        "service": "Zoho ServiceDesk Plus API",
-        "token_valid": is_token_valid(),
-        "timestamp": datetime.now().isoformat()
-    }), 200
+    """Health check endpoint to verify service status."""
+    return jsonify({"status": "running", "service": "Zoho Ticket API", "token_valid": is_token_valid()})
 
-@app.route("/create_ticket", methods=['POST'])
-def create_zoho_ticket():
-    """Create ticket in Zoho ServiceDesk Plus with proper error handling"""
-    start_time = datetime.now()
-    logger.info(f"🎫 Starting ticket creation at {start_time}")
+@app.route("/requests/<string:request_id>", methods=['GET'])
+def get_ticket(request_id):
+    """Fetches a single ticket by its ID from Zoho ServiceDesk."""
+    logger.info(f"Received GET request for ticket ID: {request_id}")
+    if not ensure_valid_token():
+        return jsonify({"error": "API authentication failed"}), 503
+
+    api_url = f"{ZOHO_CONFIG['API_BASE_URL']}/api/v3/requests/{request_id}"
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {token_store['access_token']}",
+        "Accept": "application/vnd.manageengine.sdp.v3+json"
+    }
+    try:
+        response = requests.get(api_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        logger.info(f"Successfully fetched ticket ID: {request_id}")
+        return jsonify(response.json())
+    except requests.exceptions.HTTPError as e:
+        error_details = e.response.text
+        try:
+            error_details = e.response.json()
+        except json.JSONDecodeError:
+            pass # Keep error_details as text
+        logger.error(f"HTTP Error fetching ticket {request_id}: {error_details}")
+        return jsonify({"error": "Failed to fetch ticket from Zoho", "details": error_details}), e.response.status_code
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request failed for ticket {request_id}: {e}")
+        return jsonify({"error": "API request failed"}), 500
+@app.route("/requests", methods=['POST'])
+def create_ticket():
+    """Creates a new ticket, handling data transformation for the client."""
+    logger.info("Received POST request to create a new ticket.")
+    if not ensure_valid_token():
+        return jsonify({"error": "API authentication failed."}), 503
+        
+    client_data = request.get_json()
+
+    if not client_data:
+        return jsonify({"error": "Invalid or empty JSON body provided"}), 400
+
+    required_fields = ['subject', 'description', 'requester_email']
+    if not all(field in client_data for field in required_fields):
+        return jsonify({"error": f"Missing required fields. Required fields are: {', '.join(required_fields)}"}), 400
+
+    # This logic makes the API easier to use by accepting a simple `requester_email`.
+    zoho_data = client_data.copy()
+    if 'requester_email' in zoho_data:
+        if not isinstance(zoho_data['requester_email'], str) or '@' not in zoho_data['requester_email']:
+            return jsonify({"error": "Invalid requester_email format.  Must be a valid email address."}), 400
+        email = zoho_data.pop('requester_email')
+        zoho_data['requester'] = {'email_id': email}
+
+    zoho_request_wrapper = {"request": zoho_data}
+    payload = {'input_data': json.dumps(zoho_request_wrapper)}
+
+    api_url = f"{ZOHO_CONFIG['API_BASE_URL']}/api/v3/requests"
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {token_store['access_token']}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/vnd.manageengine.sdp.v3+json"
+    }
 
     try:
-        # Get and validate request data
-        data = request.get_json()
-        if not data:
-            logger.error("No JSON data received")
-            return jsonify({"error": "No JSON data received"}), 400
-
-        logger.debug(f"Received request data: {json.dumps(data, indent=2)}")
-
-        # Validate required fields
-        base_required_fields = ['subject', 'description', 'requester_email']
-        missing_fields = [field for field in base_required_fields if not data.get(field)]
-
-        if missing_fields:
-            logger.error(f"Missing base required fields: {', '.join(missing_fields)}")
-            return jsonify({
-                "error": f"Missing required fields: {', '.join(missing_fields)}"
-            }), 400
-
-        # Ensure we have a valid token
-        if not ensure_valid_token():
-            logger.error("Failed to obtain valid access token")
-            return jsonify({
-                "error": "API authentication failed. Unable to obtain access token."
-            }), 503
-
-        # Prepare API request with CORRECT format for ServiceDesk Plus v3
-        api_url = f"{ZOHO_CONFIG['API_BASE_URL']}/api/v3/requests"
-        logger.info(f"API URL: {api_url}")
-
-        #Correct headers for ServiceDesk Plus v3 API
-        headers = {
-            "Authorization": f"Zoho-oauthtoken {token_store['access_token']}",
-            "Accept": "application/vnd.manageengine.sdp.v3+json",
-            "Content-Type": "application/x-www-form-urlencoded"  
-        }
-        logger.debug(f"Request headers: {headers}")
-
-        # Build the request data for Zoho by transforming the incoming JSON.
-        request_data_for_zoho = data.copy()
-
-        
-        if 'requester_email' in request_data_for_zoho:
-            email = request_data_for_zoho.pop('requester_email')
-            request_data_for_zoho['requester'] = {'email_id': email}
-
-        # The final payload must be wrapped in a 'request' object
-        request_data = {
-            "request": request_data_for_zoho
-        }
-
-        # CRITICAL: Prepare payload in correct format for ServiceDesk Plus
-        payload = {
-            'input_data': json.dumps(request_data)
-        }
-        logger.debug(f"Final payload structure: {json.dumps(payload, indent=2)}")
-
-        # Make the API call with retry logic
-        def make_api_request():
-            logger.info("📤 Sending request to ServiceDesk Plus API...")
-            response = requests.post(api_url, headers=headers, data=payload, timeout=30)
-            logger.info(f"📥 API Response Status: {response.status_code}")  
-            logger.debug(f"API Response Headers: {dict(response.headers)}")
-            logger.debug(f"API Response Body: {response.text}")
-            return response
-
-        # First attempt
-        response = make_api_request()
-
-        # Handle token expiry with retry
-        if response.status_code == 401:
-            logger.warning("⚠️  Access token expired, refreshing and retrying...")
-            if get_access_token():
-                headers["Authorization"] = f"Zoho-oauthtoken {token_store['access_token']}"
-                logger.info("🔄 Retrying with new token...")
-                response = make_api_request()
-            else:
-                logger.error("❌ Failed to refresh token for retry")
-                return jsonify({
-                    "error": "Authentication failed. Unable to refresh access token."
-                }), 401
-
-        # Check for success
-        if response.status_code not in [200, 201]:
-            logger.error(f"❌ API request failed with status {response.status_code}")
-            logger.error(f"Response content: {response.text}")
-
-            # Try to parse more detailed error messages from Zoho
-            try:
-                error_data = response.json()
-                response_status = error_data.get('response_status', {})
-                messages = response_status.get('messages', [])
-                
-                if messages:
-                    # Build a detailed error message from all available info
-                    error_details = []
-                    for msg in messages:
-                        # Handle both single 'field' and plural 'fields' keys
-                        fields = msg.get('fields', [])
-                        if not fields and msg.get('field'):
-                            fields = [msg.get('field')]
-
-                        msg_type = msg.get('type')
-                        message_text = msg.get('message')
-                        status_code = msg.get('status_code')
-                        
-                        # Special handling for the most common validation error
-                        if status_code == 4012 and fields:
-                            detail_str = f"Mandatory fields are missing for the template: {', '.join(fields)}"
-                        else:
-                            # Generic handling for all other errors
-                            error_parts = []
-                            if fields:
-                                error_parts.append(f"Field(s) '{', '.join(fields)}'")
-                            if msg_type:
-                                error_parts.append(f"({msg_type})")
-                            if message_text:
-                                error_parts.append(f": {message_text}")
-                            detail_str = " ".join(part for part in error_parts if part)
-
-                        if detail_str:
-                            error_details.append(detail_str.strip())
-
-                    error_message = " | ".join(error_details) if error_details else "An unspecified error occurred. See details."
-                else:
-                    # Fallback if there's no 'messages' array
-                    error_message = response_status.get('status', 'Unknown error from Zoho')
-
-                logger.error(f"Parsed Zoho API Error: {error_message}")
-                return jsonify({
-                    "error": f"ServiceDesk Plus API Error: {error_message}",
-                    "details": error_data  # Return the full JSON error from Zoho
-                }), response.status_code
-            except json.JSONDecodeError:
-                # This happens if the error response is not valid JSON (e.g., HTML from a proxy)
-                return jsonify({
-                    "error": f"API request failed with status {response.status_code} and non-JSON response",
-                    "details": response.text
-                }), response.status_code
-
-        # Parse successful response
+        response = requests.post(api_url, headers=headers, data=payload, timeout=30)
+        response.raise_for_status()
+        response_data = response.json()
+        ticket_id = response_data.get("request", {}).get("id")
+        logger.info(f"✅ Ticket created successfully - ID: {ticket_id}")
+        return jsonify({"message": "Ticket created successfully", "zoho_ticket_id": ticket_id}), 201
+    except requests.exceptions.HTTPError as e:
+        error_details = e.response.text
         try:
-            response_data = response.json()
-            logger.debug(f"Parsed response data: {json.dumps(response_data, indent=2)}")
-
-            # Extract ticket ID from response
-            ticket_id = None
-            if 'request' in response_data:
-                ticket_id = response_data['request'].get('id')
-            elif 'requests' in response_data and len(response_data['requests']) > 0:
-                ticket_id = response_data['requests'][0].get('id')
-
-            end_time = datetime.now()
-            duration = (end_time - start_time).total_seconds()
-
-            logger.info(f"✅ Ticket created successfully - ID: {ticket_id}, Duration: {duration:.2f}s")
-
-            return jsonify({
-                "message": "Ticket created successfully in Zoho ServiceDesk Plus",
-                "zoho_ticket_id": ticket_id,
-                "processing_time": f"{duration:.2f}s",
-                "timestamp": datetime.now().isoformat()
-            }), 201
-
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Failed to parse API response as JSON: {e}")
-            logger.error(f"Raw response: {response.text}")
-            return jsonify({
-                "error": "Invalid JSON response from ServiceDesk Plus API",
-                "details": response.text
-            }), 500
-
-    except requests.exceptions.Timeout:
-        logger.error("❌ API request timed out")
-        return jsonify({
-            "error": "Request to ServiceDesk Plus API timed out"
-        }), 504
-
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"❌ Connection error: {e}")
-        return jsonify({
-            "error": "Unable to connect to ServiceDesk Plus API. Check network connectivity."
-        }), 503
-
+            error_details = e.response.json()
+        except json.JSONDecodeError:
+            pass # Keep error_details as text
+        logger.error(f"HTTP Error creating ticket: {error_details}")
+        return jsonify({"error": "Failed to create ticket in Zoho", "details": error_details}), e.response.status_code
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ API request failed: {str(e)}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"Response content: {e.response.text}")
-            return jsonify({
-                "error": f"ServiceDesk Plus API request failed: {str(e)}",
-                "details": e.response.text
-            }), 500
-        return jsonify({
-            "error": f"API request failed: {str(e)}"
-        }), 500
-
+        logger.error(f"Request failed while creating ticket: {e}")
+        return jsonify({"error": "API request failed", "details": str(e)}), 500
     except Exception as e:
-        logger.error(f"❌ Unexpected error: {str(e)}", exc_info=True)
-        return jsonify({
-            "error": "Internal server error occurred while processing the request"
-        }), 500
+        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred"}), 500
 
 if __name__ == '__main__':
-    # Initialize token on startup within the main execution block.
-    # This prevents the token fetch from running twice when Flask's debug reloader is active.
     with app.app_context():
-        get_access_token()
-    logger.info("🎯 Starting ServiceDesk Plus API server...")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+        if not ensure_valid_token():
+            logger.critical("CRITICAL: Could not obtain initial Zoho token.")
+    
+    logger.info("🎯 Starting Zoho Ticket API server...")
+    app.run(host='0.0.0.0', port=5000)
