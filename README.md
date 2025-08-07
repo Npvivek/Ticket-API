@@ -14,7 +14,7 @@ A simple API gateway to create and view tickets in Zoho ServiceDesk. This servic
     ```bash
     # macOS / Linux
     python3 -m venv venv
-    source ven/bin/activate
+    source venv/bin/activate
 
     # Windows
     python -m venv venv
@@ -41,14 +41,14 @@ A simple API gateway to create and view tickets in Zoho ServiceDesk. This servic
 
 * **For development:**
     ```bash
-    python app.py
+    python zoho_ticket_api.py
     ```
     The API will be running at `http://127.0.0.1:5000`.
 
 * **For production:**
     Use a production-ready WSGI server like Gunicorn.
     ```bash
-    gunicorn --workers 4 --bind 0.0.0.0:5000 app:app
+    gunicorn --workers 4 --bind 0.0.0.0:5000 zoho_ticket_api:app
     ```
 
 ## API Endpoints
@@ -61,8 +61,8 @@ Check if the service is running and the Zoho token is valid.
 * **Success Response (200 OK):**
     ```json
     {
-        "service": "Zoho Ticket API",
         "status": "running",
+        "service": "Zoho Ticket API",
         "token_valid": true
     }
     ```
@@ -71,9 +71,9 @@ Check if the service is running and the Zoho token is valid.
 
 Creates a new ticket in Zoho.
 
-* **Endpoint:** `POST /requests`
+* **Endpoint:** `POST /create_ticket`
 * **Request Body:**
-    The `subject`, `description`, and `requester_email` fields are required. You should also include any other fields that are mandatory for your specific Zoho template.
+    The API requires `subject`, `description`, and `requester_email`. You must also include any other fields that are mandatory for your specific Zoho `template`.
 
     ```json
     {
@@ -94,6 +94,9 @@ Creates a new ticket in Zoho.
       },
       "item": {
         "name": "Other"
+      },
+      "udf_fields": {
+        "udf_char2": ["E mail", "Mobile Phone"]
       }
     }
     ```
@@ -113,7 +116,7 @@ Fetches a simplified summary of a single ticket by its ID.
 * **Endpoint:** `GET /requests/<request_id>`
 * **Example:** `GET /requests/131260000176191749`
 * **Success Response (200 OK):**
-    Returns a clean summary of the ticket, not the full object from Zoho.
+    Returns a clean summary of the ticket as defined in the code's parsing logic.
     ```json
     {
         "ticket_id": "131260000176191749",
