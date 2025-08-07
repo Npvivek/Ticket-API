@@ -10,9 +10,20 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# --- Restored Production-Grade Logging Setup ---
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# Log to a file
+file_handler = logging.FileHandler('zoho_api.log', mode='a', encoding='utf-8')
+file_handler.setFormatter(log_formatter)
+logger.addHandler(file_handler)
+
+# Log to the console
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(log_formatter)
+logger.addHandler(stream_handler)
 
 # --- Configuration ---
 ZOHO_CONFIG = {
