@@ -1,6 +1,6 @@
 # Zoho Ticket API
 
-A simple API gateway to create and view tickets in Zoho ServiceDesk. It handles Zoho's authentication so you don't have to.
+A simple API gateway to create and view tickets in Zoho ServiceDesk. This service handles Zoho's OAuth 2.0 authentication, providing a clean, stable interface for your applications.
 
 ## Setup
 
@@ -14,7 +14,7 @@ A simple API gateway to create and view tickets in Zoho ServiceDesk. It handles 
     ```bash
     # macOS / Linux
     python3 -m venv venv
-    source venv/bin/activate
+    source ven/bin/activate
 
     # Windows
     python -m venv venv
@@ -34,21 +34,21 @@ A simple API gateway to create and view tickets in Zoho ServiceDesk. It handles 
     ZOHO_CLIENT_ID="your_client_id_from_zoho"
     ZOHO_CLIENT_SECRET="your_client_secret_from_zoho"
     ZOHO_REFRESH_TOKEN="your_refresh_token_from_zoho"
-    ZOHO_API_BASE_URL="https://servicedeskplus.zoho.com" # Or your specific Zoho domain
+    ZOHO_API_BASE_URL="[https://support.quatrrobss.com](https://support.quatrrobss.com)"
     ```
 
 ## Running the API
 
-*   **For development:**
+* **For development:**
     ```bash
-    python zoho_ticket_api.py
+    python app.py
     ```
     The API will be running at `http://127.0.0.1:5000`.
 
-*   **For production:**
-    Use a production-ready server like Gunicorn.
+* **For production:**
+    Use a production-ready WSGI server like Gunicorn.
     ```bash
-    gunicorn --bind 0.0.0.0:5000 "zoho_ticket_api:app"
+    gunicorn --workers 4 --bind 0.0.0.0:5000 app:app
     ```
 
 ## API Endpoints
@@ -57,8 +57,8 @@ A simple API gateway to create and view tickets in Zoho ServiceDesk. It handles 
 
 Check if the service is running and the Zoho token is valid.
 
-*   **Endpoint:** `GET /`
-*   **Success Response (200 OK):**
+* **Endpoint:** `GET /`
+* **Success Response (200 OK):**
     ```json
     {
         "service": "Zoho Ticket API",
@@ -71,15 +71,15 @@ Check if the service is running and the Zoho token is valid.
 
 Creates a new ticket in Zoho.
 
-*   **Endpoint:** `POST /requests`
-*   **Request Body:**
-    The `subject`, `description`, and `requester_email` fields are required. You can include any other standard Zoho fields like `urgency`, `category`, etc.
+* **Endpoint:** `POST /requests`
+* **Request Body:**
+    The `subject`, `description`, and `requester_email` fields are required. You should also include any other fields that are mandatory for your specific Zoho template.
 
     ```json
     {
       "subject": "AI Hub Testing",
       "description": "Please cancel/resolve this ticket. This is only for testing purpose.",
-      "requester_email": "nischay.thakur@continuserve.com",
+      "requester_email": "vivek.nakka@continuserve.com",
       "template": {
         "name": "*Other / Misc. Issues"
       },
@@ -94,38 +94,32 @@ Creates a new ticket in Zoho.
       },
       "item": {
         "name": "Other"
-      },
-      "udf_fields": {
-        "udf_char2": ["E mail", "Mobile Phone"]
       }
     }
     ```
 
-*   **Success Response (201 Created):**
+* **Success Response (201 Created):**
     ```json
     {
         "message": "Ticket created successfully",
-        "zoho_ticket_id": "123456789012345678"
+        "zoho_ticket_id": "131260000176191749"
     }
     ```
 
 ### Get a Ticket
 
-Fetches the details of a single ticket by its ID.
+Fetches a simplified summary of a single ticket by its ID.
 
-*   **Endpoint:** `GET /requests/<request_id>`
-*   **Example:** `GET /requests/123456789012345678`
-*   **Success Response (200 OK):**
-    Returns the full ticket object directly from the Zoho API.
+* **Endpoint:** `GET /requests/<request_id>`
+* **Example:** `GET /requests/131260000176191749`
+* **Success Response (200 OK):**
+    Returns a clean summary of the ticket, not the full object from Zoho.
     ```json
     {
-        "request": {
-            "id": "123456789012345678",
-            "subject": "Cannot access shared drive",
-            "status": {
-                "name": "Open",
-                "id": "1"
-            }
-        }
+        "ticket_id": "131260000176191749",
+        "status": "Open",
+        "technician_assigned": "Unassigned",
+        "technician_contact_email": null,
+        "technician_comments": null
     }
     ```

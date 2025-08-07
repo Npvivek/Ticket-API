@@ -7,21 +7,14 @@ from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
+# Load environment variables from .env file
 load_dotenv()
 
 # --- Logging Setup ---
-log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
-file_handler = logging.FileHandler('zoho_api.log', mode='a')
-file_handler.setFormatter(log_formatter)
-logger.addHandler(file_handler)
-
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(log_formatter)
-logger.addHandler(stream_handler)
-
+# --- Configuration ---
 ZOHO_CONFIG = {
     "CLIENT_ID": os.getenv("ZOHO_CLIENT_ID"),
     "CLIENT_SECRET": os.getenv("ZOHO_CLIENT_SECRET"),
@@ -35,7 +28,7 @@ token_store = {"access_token": None, "expires_at": None}
 _token_lock = threading.Lock()
 
 def get_access_token():
-    """Fetches a new access token from Zoho using the refresh token."""    
+    """Fetches a new access token from Zoho using the refresh token."""
     logger.info("Attempting to refresh Zoho access token...")
     url = f"{ZOHO_CONFIG['ACCOUNTS_URL']}/oauth/v2/token"
     payload = {
@@ -75,6 +68,24 @@ def ensure_valid_token():
             return True
         return get_access_token()
 
+# --- Helper Function to Parse Ticket Details ---
+def _parse_ticket_details(zoho_response):
+    """Parses the full Zoho ticket JSON and returns a simplified dictionary."""
+    request_data = zoho_response.get("request", {})
+    
+    status_info = request_data.get("status", {})
+    technician_info = request_data.get("technician")
+    resolution_info = request_data.get("resolution")
+
+    simplified_ticket = {
+        "ticket_id": request_data.get("id"),
+        "status": status_info.get("name") if status_info else None,
+        "technician_assigned": technician_info.get("name") if technician_info else "Unassigned",
+        "technician_contact_email": technician_info.get("email_id") if technician_info else None,
+        "technician_comments": resolution_info.get("content") if resolution_info else None
+    }
+    return simplified_ticket
+
 # --- Flask Application ---
 app = Flask(__name__)
 
@@ -85,7 +96,7 @@ def health_check():
 
 @app.route("/requests/<string:request_id>", methods=['GET'])
 def get_ticket(request_id):
-    """Fetches a single ticket by its ID from Zoho ServiceDesk."""
+    """Fetches and returns simplified details for a single ticket."""
     logger.info(f"Received GET request for ticket ID: {request_id}")
     if not ensure_valid_token():
         return jsonify({"error": "API authentication failed"}), 503
@@ -98,19 +109,20 @@ def get_ticket(request_id):
     try:
         response = requests.get(api_url, headers=headers, timeout=30)
         response.raise_for_status()
-        logger.info(f"Successfully fetched ticket ID: {request_id}")
-        return jsonify(response.json())
+        
+        full_ticket_data = response.json()
+        simplified_ticket = _parse_ticket_details(full_ticket_data)
+        
+        logger.info(f"Successfully fetched and parsed ticket ID: {request_id}")
+        return jsonify(simplified_ticket), 200
+        
     except requests.exceptions.HTTPError as e:
-        error_details = e.response.text
-        try:
-            error_details = e.response.json()
-        except json.JSONDecodeError:
-            pass # Keep error_details as text
-        logger.error(f"HTTP Error fetching ticket {request_id}: {error_details}")
-        return jsonify({"error": "Failed to fetch ticket from Zoho", "details": error_details}), e.response.status_code
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request failed for ticket {request_id}: {e}")
-        return jsonify({"error": "API request failed"}), 500
+        logger.error(f"HTTP Error fetching ticket {request_id}: {e.response.text}")
+        return jsonify({"error": "Failed to fetch ticket", "details": e.response.json()}), e.response.status_code
+    except Exception as e:
+        logger.error(f"Unexpected error getting ticket {request_id}: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred."}), 500
+
 @app.route("/requests", methods=['POST'])
 def create_ticket():
     """Creates a new ticket, handling data transformation for the client."""
@@ -119,19 +131,11 @@ def create_ticket():
         return jsonify({"error": "API authentication failed."}), 503
         
     client_data = request.get_json()
-
     if not client_data:
         return jsonify({"error": "Invalid or empty JSON body provided"}), 400
 
-    required_fields = ['subject', 'description', 'requester_email']
-    if not all(field in client_data for field in required_fields):
-        return jsonify({"error": f"Missing required fields. Required fields are: {', '.join(required_fields)}"}), 400
-
-    # This logic makes the API easier to use by accepting a simple `requester_email`.
     zoho_data = client_data.copy()
     if 'requester_email' in zoho_data:
-        if not isinstance(zoho_data['requester_email'], str) or '@' not in zoho_data['requester_email']:
-            return jsonify({"error": "Invalid requester_email format.  Must be a valid email address."}), 400
         email = zoho_data.pop('requester_email')
         zoho_data['requester'] = {'email_id': email}
 
@@ -153,16 +157,8 @@ def create_ticket():
         logger.info(f"✅ Ticket created successfully - ID: {ticket_id}")
         return jsonify({"message": "Ticket created successfully", "zoho_ticket_id": ticket_id}), 201
     except requests.exceptions.HTTPError as e:
-        error_details = e.response.text
-        try:
-            error_details = e.response.json()
-        except json.JSONDecodeError:
-            pass # Keep error_details as text
-        logger.error(f"HTTP Error creating ticket: {error_details}")
-        return jsonify({"error": "Failed to create ticket in Zoho", "details": error_details}), e.response.status_code
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request failed while creating ticket: {e}")
-        return jsonify({"error": "API request failed", "details": str(e)}), 500
+        logger.error(f"API request failed: {e.response.text}")
+        return jsonify({"error": "Failed to create ticket", "details": e.response.json()}), e.response.status_code
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         return jsonify({"error": "An internal server error occurred"}), 500
@@ -173,4 +169,6 @@ if __name__ == '__main__':
             logger.critical("CRITICAL: Could not obtain initial Zoho token.")
     
     logger.info("🎯 Starting Zoho Ticket API server...")
-    app.run(host='0.0.0.0', port=5000)
+    # The app.run() block is for development only.
+    # For production, use a WSGI server like Gunicorn.
+    app.run(host='0.0.0.0', port=5000, debug=False)
