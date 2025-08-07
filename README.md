@@ -34,7 +34,7 @@ A simple API gateway to create and view tickets in Zoho ServiceDesk. This servic
     ZOHO_CLIENT_ID="your_client_id_from_zoho"
     ZOHO_CLIENT_SECRET="your_client_secret_from_zoho"
     ZOHO_REFRESH_TOKEN="your_refresh_token_from_zoho"
-    ZOHO_API_BASE_URL="[https://support.quatrrobss.com](https://support.quatrrobss.com)"
+    ZOHO_API_BASE_URL="[https://support.quatrrobss.com](Zoho service desk instance URL)"
     ```
 
 ## Running the API
